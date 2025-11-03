@@ -1,14 +1,12 @@
 import streamlit as st
 import gspread
 import pandas as pd
-# IMPORTANT: Added the 'secrets' import for secure deployment
-from streamlit import secrets 
+from streamlit import secrets # IMPORTANT: Added the 'secrets' import
 from google.oauth2.service_account import Credentials
 import os 
 
 # --- Google Sheets Setup ---
 SHEET_NAME = "App 2025 Finances"
-# NOTE: The CREDENTIALS_FILE variable is no longer used, as we rely on secrets.
 
 scope = [
     "https://spreadsheets.google.com/feeds",
@@ -18,7 +16,6 @@ scope = [
 # --- Load Credentials SECURELY ---
 try:
     # Use Streamlit's secure secrets management for deployment
-    # We construct the credentials dictionary directly from st.secrets['gspread']
     
     # 1. Build the dictionary from Streamlit secrets
     creds_dict = {
@@ -49,34 +46,28 @@ except Exception as e:
     st.stop()
 
 
-# Authorize gspread client (runs on every rerun)
+# Authorize gspread client
 client = gspread.authorize(creds)
 
 
 # --- CACHED FUNCTION 1: Load Sheet Data (Headers and Accounts) ---
-@st.cache_data(ttl=300) # Cache for 5 minutes
+@st.cache_data(ttl=86400) # Increased to 24 hours for stability
 def load_transaction_data(_client):
-    # Fetch data using the client but don't return the sheet object (avoiding auth errors)
     temp_sheet = _client.open(SHEET_NAME).worksheet("TRNSX")
     all_sheet_headers = temp_sheet.row_values(4)
-    accounts = all_sheet_headers[4:15]  # E4 to O4
+    accounts = all_sheet_headers[4:15]
     accounts = [acc for acc in accounts if acc.strip()]
     return all_sheet_headers, accounts
 
 # --- CACHED FUNCTION 2: Load Categories (Dynamic Segments) ---
-@st.cache_data(ttl=300) # Cache for 5 minutes
+@st.cache_data(ttl=86400) # Increased to 24 hours for stability
 def load_categories(_client):
     try:
         stat_sheet = _client.open(SHEET_NAME).worksheet("Stat")
         all_categories = stat_sheet.col_values(1)
 
-        # A9:A37 (Expense) -> Python index [8:37]
         expense_categories = [cat for cat in all_categories[8:37] if cat.strip()]
-        
-        # A39:A43 (Income) -> Python index [38:43]
         income_categories = [cat for cat in all_categories[38:43] if cat.strip()]
-        
-        # A48:A55 (Invest) -> Python index [47:55]
         invest_categories = [cat for cat in all_categories[47:55] if cat.strip()]
         
         return expense_categories, income_categories, invest_categories
@@ -91,7 +82,6 @@ expense_categories, income_categories, invest_categories = load_categories(clien
 
 
 # --- Streamlit UI ---
-# Mobile-Optimized Layout: No sidebar, all inputs in the main column.
 st.set_page_config(page_title="Finance Quick Entry", page_icon="💸", layout="centered")
 
 st.title("💸 Finance Quick Entry")
@@ -99,7 +89,6 @@ st.write("Easily add a transaction to your Google Sheet.")
 
 st.header("🧾 New Transaction Entry")
 
-# All inputs are now in the main column (mobile-friendly flow)
 date = st.date_input("Date")
 trans_type = st.selectbox("Transaction Type", ["EXPENSE", "INCOME", "TRNSFR", "INVST"])
 
@@ -121,7 +110,6 @@ elif trans_type == "INVST":
     category = st.selectbox("Category (Invest)", invest_categories)
     st.markdown('---') 
 else: # TRNSFR
-    # Category remains blank
     pass 
 # --- End Category logic ---
     
@@ -144,7 +132,6 @@ if trans_type == "TRNSFR":
     with col1:
         from_account = st.selectbox("From Account (Debit)", accounts, key='from_acc')
     
-    # Filter out the 'from' account for the 'to' account selection
     to_accounts_filtered = [acc for acc in accounts if acc != from_account]
     
     if not to_accounts_filtered:
@@ -156,7 +143,7 @@ if trans_type == "TRNSFR":
         
     st.markdown('---') 
     
-    # 2. Amount Input (Moved to appear before fee)
+    # 2. Amount Input
     amount_input = st.number_input("Amount (Positive Value)", min_value=0.0, step=0.01, help="Enter the transfer amount.")
     
     # 3. Transfer Fee Option
@@ -173,7 +160,7 @@ else:
     amount_input = st.number_input("Amount (Positive Value)", min_value=0.0, step=0.01, help="Enter a positive number. Decimals optional.")
 
 
-# FIX: Ensure the st.button call is complete
+# --- START OF BUTTON LOGIC (Stability Fix is here) ---
 if st.button("➕ Add Transaction", use_container_width=True):
     try:
         # 1. Validation
@@ -197,43 +184,39 @@ if st.button("➕ Add Transaction", use_container_width=True):
 
         # Find the first empty row in Column A (Date)
         col_a = sheet.col_values(1) 
-        next_row = len(col_a) + 1  # first blank after last filled A cell
+        next_row = len(col_a) + 1
 
         # Apply desired date format
         formatted_date = date.strftime("%#d %b %Y") if os.name == 'nt' else date.strftime("%-d %b %Y")
         if not formatted_date or formatted_date.startswith('0'):
-            # Fallback/Safe format:
             formatted_date = date.strftime("%d %b %Y").lstrip('0')
             
-        # Prepare row with blanks. We need 15 columns (A-O) for input data.
-        ROW_DATA_LENGTH = 15 # A=1, B=2, ... O=15
+        # Prepare row data
+        ROW_DATA_LENGTH = 15
         row_data = [""] * ROW_DATA_LENGTH 
         
-        row_data[0] = formatted_date     # Date (A)
-        row_data[1] = trans_type         # Type (B)
-        row_data[2] = category           # Category (C)
-        row_data[3] = note               # Note (D)
+        row_data[0] = formatted_date
+        row_data[1] = trans_type
+        row_data[2] = category
+        row_data[3] = note
         
         success_msg = ""
         
         # 4. Handle single or dual account transactions
         if trans_type == "TRNSFR":
             
-            # Apply fee to the debited amount
             debit_amount = amount_numerical + transfer_fee_amount
             credit_amount = amount_numerical
             
-            # Negative amount (Debit) to From Account
             if from_account in all_sheet_headers:
                 from_acc_index = all_sheet_headers.index(from_account)
                 if 0 <= from_acc_index < ROW_DATA_LENGTH:
-                     row_data[from_acc_index] = -debit_amount # Write negative float (Original + Fee)
+                     row_data[from_acc_index] = -debit_amount
             
-            # Positive amount (Credit) to To Account
             if to_account in all_sheet_headers:
                 to_acc_index = all_sheet_headers.index(to_account)
                 if 0 <= to_acc_index < ROW_DATA_LENGTH:
-                     row_data[to_acc_index] = credit_amount # Write positive float (Original)
+                     row_data[to_acc_index] = credit_amount
             
             if transfer_fee_amount > 0:
                  fee_display = f" (Fee: ₱{transfer_fee_amount:,.2f} applied to debit, total debit: ₱{-debit_amount:,.2f})"
@@ -243,19 +226,16 @@ if st.button("➕ Add Transaction", use_container_width=True):
             success_msg = f"✅ Added {trans_type} of {success_amount_display} from **{from_account}** to **{to_account}**.{fee_display}"
             
         elif account_for_single_transactions in all_sheet_headers:
-            # EXPENSE, INCOME, INVST Logic: Write one amount
             
             amount_to_write = amount_numerical
             
-            # TWEAK: Handle negative sign for EXPENSE and INVST
             if trans_type == "EXPENSE" or trans_type == "INVST":
                 amount_to_write = -amount_numerical
                 st.info(f"Automatically converting amount to **negative** for **{trans_type}**.")
             
-            # Write amount to the single account column
             account_index = all_sheet_headers.index(account_for_single_transactions)
             if 0 <= account_index < ROW_DATA_LENGTH:
-                 row_data[account_index] = amount_to_write # Write the float (already signed)
+                 row_data[account_index] = amount_to_write
             else:
                 st.warning(f"Account column '{account_for_single_transactions}' is outside the writable range (A-O) and was skipped.")
                 
@@ -266,27 +246,29 @@ if st.button("➕ Add Transaction", use_container_width=True):
             st.stop()
 
 
-        # Write range limited to A through O (the 15th column) to protect Column P formulas
         WRITE_END_COLUMN = 'O'
         cell_range = f"A{next_row}:{WRITE_END_COLUMN}{next_row}"
         
-        # We write only the first 15 elements of row_data
         sheet.update(cell_range, [row_data])
+        
+        # --- NEW STABILITY CODE: Clear Caches to Force Fresh Data Load ---
+        st.cache_data.clear()
+        # --- END NEW STABILITY CODE ---
 
         # Display success message (this triggers a rerun, which reloads the table below)
         st.success(success_msg)
         
     except Exception as e:
         st.error(f"❌ Error adding transaction: {e}")
+# --- END OF BUTTON LOGIC ---
 
 st.markdown("---")
 
 # --- Display last 5 transactions (Stable Table View) ---
-# FIX: Get a fresh sheet object immediately before reading
 try:
     sheet = client.open(SHEET_NAME).worksheet("TRNSX")
     data = sheet.get_all_values()
-    sheet_headers = data[3]  # Row 4 from sheet
+    sheet_headers = data[3]
 
     # --- Create a unique, cleaned list of headers (required for DataFrame) ---
     if len(sheet_headers) >= 4:
@@ -313,21 +295,17 @@ try:
 
     data_rows = data[4:]
     
-    # Filter out blank rows based on Column A (Date)
     valid_data_rows = [row for row in data_rows if row and str(row[0]).strip()]
     
     st.subheader("📊 Last 5 Transactions")
     
     if valid_data_rows:
-        # Resilient DataFrame Creation
         max_row_width = max(len(row) for row in valid_data_rows)
         df = pd.DataFrame(valid_data_rows, columns=final_headers[:max_row_width])
         
-        # Get the last 5 transactions and display
-        st.dataframe(df.tail(5).iloc[::-1], use_container_width=True) # Show last 5, reversed for newest first
+        st.dataframe(df.tail(5).iloc[::-1], use_container_width=True)
     else:
         st.write("No valid transactions found to display.")
         
 except Exception as e:
-    # If the transaction list fails to load, show a warning, but don't stop the whole app
     st.warning(f"Could not load recent transactions: {e}")
